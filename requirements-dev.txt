@@ -1,0 +1,6 @@
+pytest>=8,<10
+pytest-asyncio>=0.25,<2
+httpx>=0.28,<1
+PyYAML>=6,<7
+-r services/auth/requirements.lock
+-r gateway/requirements.lock

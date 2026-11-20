@@ -1,0 +1,584 @@
+{
+  "name": "ampis",
+  "services": {
+    "auth-db": {
+      "image": "${POSTGRES_IMAGE:?Set approved fixed PostgreSQL image}",
+      "restart": "unless-stopped",
+      "environment": {
+        "POSTGRES_DB": "auth",
+        "POSTGRES_USER": "auth",
+        "POSTGRES_PASSWORD": "${AUTH_DB_PASSWORD:?Run prepare.py}"
+      },
+      "volumes": [
+        "auth-db-data:/var/lib/postgresql/data"
+      ],
+      "networks": [
+        "auth-db-net"
+      ],
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "pg_isready -U auth -d auth"
+        ],
+        "interval": "5s",
+        "timeout": "3s",
+        "retries": 20
+      }
+    },
+    "auth-api": {
+      "build": {
+        "context": "./services/auth",
+        "args": {
+          "PYTHON_IMAGE": "${PYTHON_IMAGE:?Set approved fixed Python image}"
+        }
+      },
+      "image": "ampis-auth:local",
+      "restart": "unless-stopped",
+      "environment": {
+        "DATABASE_URL": "postgresql+psycopg://auth:${AUTH_DB_PASSWORD}@auth-db/auth",
+        "JWT_PUBLIC_KEY_FILE": "/run/secrets/jwt_public",
+        "JWT_ISSUER": "ampis-auth",
+        "JWT_AUDIENCE": "ampis",
+        "JWT_PRIVATE_KEY_FILE": "/run/secrets/jwt_private"
+      },
+      "secrets": [
+        "jwt_public",
+        "jwt_private"
+      ],
+      "networks": [
+        "edge",
+        "auth-db-net"
+      ],
+      "depends_on": {
+        "auth-db": {
+          "condition": "service_healthy"
+        }
+      },
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready', timeout=3)"
+        ],
+        "interval": "10s",
+        "timeout": "5s",
+        "retries": 12,
+        "start_period": "30s"
+      },
+      "user": "${APP_UID:-10001}:${APP_GID:-10001}"
+    },
+    "auth-worker": {
+      "image": "ampis-auth:local",
+      "restart": "unless-stopped",
+      "command": [
+        "python",
+        "-m",
+        "app.worker"
+      ],
+      "environment": {
+        "DATABASE_URL": "postgresql+psycopg://auth:${AUTH_DB_PASSWORD}@auth-db/auth",
+        "JWT_PUBLIC_KEY_FILE": "/run/secrets/jwt_public",
+        "JWT_ISSUER": "ampis-auth",
+        "JWT_AUDIENCE": "ampis",
+        "RABBITMQ_URL": "amqp://auth:${AUTH_MQ_PASSWORD}@rabbitmq/ampis"
+      },
+      "secrets": [
+        "jwt_public"
+      ],
+      "networks": [
+        "auth-db-net",
+        "broker"
+      ],
+      "depends_on": {
+        "auth-api": {
+          "condition": "service_healthy"
+        },
+        "rabbitmq": {
+          "condition": "service_healthy"
+        }
+      },
+      "user": "${APP_UID:-10001}:${APP_GID:-10001}",
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "python",
+          "-c",
+          "from pathlib import Path; import time; p=Path('/tmp/worker-ready'); assert p.exists() and time.time()-p.stat().st_mtime<20"
+        ],
+        "interval": "10s",
+        "timeout": "3s",
+        "retries": 3,
+        "start_period": "20s"
+      }
+    },
+    "upload-db": {
+      "image": "${POSTGRES_IMAGE:?Set approved fixed PostgreSQL image}",
+      "restart": "unless-stopped",
+      "environment": {
+        "POSTGRES_DB": "upload",
+        "POSTGRES_USER": "upload",
+        "POSTGRES_PASSWORD": "${UPLOAD_DB_PASSWORD:?Run prepare.py}"
+      },
+      "volumes": [
+        "upload-db-data:/var/lib/postgresql/data"
+      ],
+      "networks": [
+        "upload-db-net"
+      ],
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "pg_isready -U upload -d upload"
+        ],
+        "interval": "5s",
+        "timeout": "3s",
+        "retries": 20
+      }
+    },
+    "upload-api": {
+      "build": {
+        "context": "./services/upload",
+        "args": {
+          "PYTHON_IMAGE": "${PYTHON_IMAGE:?Set approved fixed Python image}"
+        }
+      },
+      "image": "ampis-upload:local",
+      "restart": "unless-stopped",
+      "environment": {
+        "DATABASE_URL": "postgresql+psycopg://upload:${UPLOAD_DB_PASSWORD}@upload-db/upload",
+        "JWT_PUBLIC_KEY_FILE": "/run/secrets/jwt_public",
+        "JWT_ISSUER": "ampis-auth",
+        "JWT_AUDIENCE": "ampis",
+        "S3_ENDPOINT": "http://rustfs:9000",
+        "S3_ACCESS_KEY": "${UPLOAD_ACCESS_KEY}",
+        "S3_SECRET_KEY": "${UPLOAD_SECRET_KEY}",
+        "RUNTIME_DIR": "/run/ampis"
+      },
+      "secrets": [
+        "jwt_public"
+      ],
+      "networks": [
+        "edge",
+        "upload-db-net",
+        "objects"
+      ],
+      "depends_on": {
+        "upload-db": {
+          "condition": "service_healthy"
+        }
+      },
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready', timeout=3)"
+        ],
+        "interval": "10s",
+        "timeout": "5s",
+        "retries": 12,
+        "start_period": "30s"
+      },
+      "user": "${APP_UID:-10001}:${APP_GID:-10001}",
+      "volumes": [
+        "./.runtime/upload:/run/ampis"
+      ]
+    },
+    "upload-worker": {
+      "image": "ampis-upload:local",
+      "restart": "unless-stopped",
+      "command": [
+        "python",
+        "-m",
+        "app.worker"
+      ],
+      "environment": {
+        "DATABASE_URL": "postgresql+psycopg://upload:${UPLOAD_DB_PASSWORD}@upload-db/upload",
+        "JWT_PUBLIC_KEY_FILE": "/run/secrets/jwt_public",
+        "JWT_ISSUER": "ampis-auth",
+        "JWT_AUDIENCE": "ampis",
+        "S3_ENDPOINT": "http://rustfs:9000",
+        "S3_ACCESS_KEY": "${UPLOAD_ACCESS_KEY}",
+        "S3_SECRET_KEY": "${UPLOAD_SECRET_KEY}",
+        "RABBITMQ_URL": "amqp://upload:${UPLOAD_MQ_PASSWORD}@rabbitmq/ampis",
+        "EVENT_QUEUE": "upload.events",
+        "RUNTIME_DIR": "/run/ampis"
+      },
+      "secrets": [
+        "jwt_public"
+      ],
+      "networks": [
+        "upload-db-net",
+        "broker",
+        "objects"
+      ],
+      "depends_on": {
+        "upload-api": {
+          "condition": "service_healthy"
+        },
+        "rabbitmq": {
+          "condition": "service_healthy"
+        }
+      },
+      "user": "${APP_UID:-10001}:${APP_GID:-10001}",
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "python",
+          "-c",
+          "from pathlib import Path; import time; p=Path('/tmp/worker-ready'); assert p.exists() and time.time()-p.stat().st_mtime<20"
+        ],
+        "interval": "10s",
+        "timeout": "3s",
+        "retries": 3,
+        "start_period": "20s"
+      },
+      "volumes": [
+        "./.runtime/upload:/run/ampis"
+      ]
+    },
+    "download-db": {
+      "image": "${POSTGRES_IMAGE:?Set approved fixed PostgreSQL image}",
+      "restart": "unless-stopped",
+      "environment": {
+        "POSTGRES_DB": "download",
+        "POSTGRES_USER": "download",
+        "POSTGRES_PASSWORD": "${DOWNLOAD_DB_PASSWORD:?Run prepare.py}"
+      },
+      "volumes": [
+        "download-db-data:/var/lib/postgresql/data"
+      ],
+      "networks": [
+        "download-db-net"
+      ],
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "pg_isready -U download -d download"
+        ],
+        "interval": "5s",
+        "timeout": "3s",
+        "retries": 20
+      }
+    },
+    "download-api": {
+      "build": {
+        "context": "./services/download",
+        "args": {
+          "PYTHON_IMAGE": "${PYTHON_IMAGE:?Set approved fixed Python image}"
+        }
+      },
+      "image": "ampis-download:local",
+      "restart": "unless-stopped",
+      "environment": {
+        "DATABASE_URL": "postgresql+psycopg://download:${DOWNLOAD_DB_PASSWORD}@download-db/download",
+        "JWT_PUBLIC_KEY_FILE": "/run/secrets/jwt_public",
+        "JWT_ISSUER": "ampis-auth",
+        "JWT_AUDIENCE": "ampis",
+        "S3_ENDPOINT": "http://rustfs:9000",
+        "S3_ACCESS_KEY": "${DOWNLOAD_ACCESS_KEY}",
+        "S3_SECRET_KEY": "${DOWNLOAD_SECRET_KEY}",
+        "RUNTIME_DIR": "/run/ampis"
+      },
+      "secrets": [
+        "jwt_public"
+      ],
+      "networks": [
+        "edge",
+        "download-db-net",
+        "objects"
+      ],
+      "depends_on": {
+        "download-db": {
+          "condition": "service_healthy"
+        }
+      },
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready', timeout=3)"
+        ],
+        "interval": "10s",
+        "timeout": "5s",
+        "retries": 12,
+        "start_period": "30s"
+      },
+      "user": "${APP_UID:-10001}:${APP_GID:-10001}",
+      "volumes": [
+        "./.runtime/download:/run/ampis"
+      ]
+    },
+    "download-worker": {
+      "image": "ampis-download:local",
+      "restart": "unless-stopped",
+      "command": [
+        "python",
+        "-m",
+        "app.worker"
+      ],
+      "environment": {
+        "DATABASE_URL": "postgresql+psycopg://download:${DOWNLOAD_DB_PASSWORD}@download-db/download",
+        "JWT_PUBLIC_KEY_FILE": "/run/secrets/jwt_public",
+        "JWT_ISSUER": "ampis-auth",
+        "JWT_AUDIENCE": "ampis",
+        "S3_ENDPOINT": "http://rustfs:9000",
+        "S3_ACCESS_KEY": "${DOWNLOAD_ACCESS_KEY}",
+        "S3_SECRET_KEY": "${DOWNLOAD_SECRET_KEY}",
+        "RABBITMQ_URL": "amqp://download:${DOWNLOAD_MQ_PASSWORD}@rabbitmq/ampis",
+        "EVENT_QUEUE": "download.events"
+      },
+      "secrets": [
+        "jwt_public"
+      ],
+      "networks": [
+        "download-db-net",
+        "broker"
+      ],
+      "depends_on": {
+        "download-api": {
+          "condition": "service_healthy"
+        },
+        "rabbitmq": {
+          "condition": "service_healthy"
+        }
+      },
+      "user": "${APP_UID:-10001}:${APP_GID:-10001}",
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "python",
+          "-c",
+          "from pathlib import Path; import time; p=Path('/tmp/worker-ready'); assert p.exists() and time.time()-p.stat().st_mtime<20"
+        ],
+        "interval": "10s",
+        "timeout": "3s",
+        "retries": 3,
+        "start_period": "20s"
+      }
+    },
+    "reports-db": {
+      "image": "${POSTGRES_IMAGE:?Set approved fixed PostgreSQL image}",
+      "restart": "unless-stopped",
+      "environment": {
+        "POSTGRES_DB": "reports",
+        "POSTGRES_USER": "reports",
+        "POSTGRES_PASSWORD": "${REPORTS_DB_PASSWORD:?Run prepare.py}"
+      },
+      "volumes": [
+        "reports-db-data:/var/lib/postgresql/data"
+      ],
+      "networks": [
+        "reports-db-net"
+      ],
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "pg_isready -U reports -d reports"
+        ],
+        "interval": "5s",
+        "timeout": "3s",
+        "retries": 20
+      }
+    },
+    "reports-api": {
+      "build": {
+        "context": "./services/reports",
+        "args": {
+          "PYTHON_IMAGE": "${PYTHON_IMAGE:?Set approved fixed Python image}"
+        }
+      },
+      "image": "ampis-reports:local",
+      "restart": "unless-stopped",
+      "environment": {
+        "DATABASE_URL": "postgresql+psycopg://reports:${REPORTS_DB_PASSWORD}@reports-db/reports",
+        "JWT_PUBLIC_KEY_FILE": "/run/secrets/jwt_public",
+        "JWT_ISSUER": "ampis-auth",
+        "JWT_AUDIENCE": "ampis"
+      },
+      "secrets": [
+        "jwt_public"
+      ],
+      "networks": [
+        "edge",
+        "reports-db-net"
+      ],
+      "depends_on": {
+        "reports-db": {
+          "condition": "service_healthy"
+        }
+      },
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready', timeout=3)"
+        ],
+        "interval": "10s",
+        "timeout": "5s",
+        "retries": 12,
+        "start_period": "30s"
+      },
+      "user": "${APP_UID:-10001}:${APP_GID:-10001}"
+    },
+    "reports-worker": {
+      "image": "ampis-reports:local",
+      "restart": "unless-stopped",
+      "command": [
+        "python",
+        "-m",
+        "app.worker"
+      ],
+      "environment": {
+        "DATABASE_URL": "postgresql+psycopg://reports:${REPORTS_DB_PASSWORD}@reports-db/reports",
+        "JWT_PUBLIC_KEY_FILE": "/run/secrets/jwt_public",
+        "JWT_ISSUER": "ampis-auth",
+        "JWT_AUDIENCE": "ampis",
+        "RABBITMQ_URL": "amqp://reports:${REPORTS_MQ_PASSWORD}@rabbitmq/ampis",
+        "EVENT_QUEUE": "reports.events"
+      },
+      "secrets": [
+        "jwt_public"
+      ],
+      "networks": [
+        "reports-db-net",
+        "broker"
+      ],
+      "depends_on": {
+        "reports-api": {
+          "condition": "service_healthy"
+        },
+        "rabbitmq": {
+          "condition": "service_healthy"
+        }
+      },
+      "user": "${APP_UID:-10001}:${APP_GID:-10001}",
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "python",
+          "-c",
+          "from pathlib import Path; import time; p=Path('/tmp/worker-ready'); assert p.exists() and time.time()-p.stat().st_mtime<20"
+        ],
+        "interval": "10s",
+        "timeout": "3s",
+        "retries": 3,
+        "start_period": "20s"
+      }
+    },
+    "rabbitmq": {
+      "image": "${RABBITMQ_IMAGE:?Set approved fixed RabbitMQ image}",
+      "restart": "unless-stopped",
+      "environment": {
+        "RABBITMQ_DEFAULT_USER": "bootstrap",
+        "RABBITMQ_DEFAULT_PASS": "${AUTH_MQ_PASSWORD}",
+        "RABBITMQ_DEFAULT_VHOST": "ampis"
+      },
+      "volumes": [
+        "rabbitmq-data:/var/lib/rabbitmq"
+      ],
+      "networks": [
+        "broker"
+      ],
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "rabbitmq-diagnostics",
+          "-q",
+          "ping"
+        ],
+        "interval": "10s",
+        "timeout": "5s",
+        "retries": 12
+      },
+      "hostname": "rabbitmq"
+    },
+    "rustfs": {
+      "image": "${RUSTFS_IMAGE:?Set approved fixed RustFS image}",
+      "restart": "unless-stopped",
+      "environment": {
+        "RUSTFS_ACCESS_KEY": "${RUSTFS_ROOT_USER}",
+        "RUSTFS_SECRET_KEY": "${RUSTFS_ROOT_PASSWORD}",
+        "RUSTFS_VOLUMES": "/data",
+        "RUSTFS_CONSOLE_ENABLE": "true"
+      },
+      "volumes": [
+        "rustfs-data:/data"
+      ],
+      "networks": [
+        "objects"
+      ],
+      "ports": [
+        "127.0.0.1:9001:9001"
+      ]
+    },
+    "gateway": {
+      "build": {
+        "context": "./gateway",
+        "args": {
+          "PYTHON_IMAGE": "${PYTHON_IMAGE:?Set approved fixed Python image}"
+        }
+      },
+      "restart": "unless-stopped",
+      "ports": [
+        "127.0.0.1:8080:8000"
+      ],
+      "networks": [
+        "edge"
+      ],
+      "secrets": [
+        "jwt_public"
+      ],
+      "environment": {
+        "FLASK_SECRET_KEY": "${FLASK_SECRET_KEY:?Run prepare.py}",
+        "JWT_PUBLIC_KEY_FILE": "/run/secrets/jwt_public",
+        "JWT_ISSUER": "ampis-auth",
+        "JWT_AUDIENCE": "ampis",
+        "COOKIE_SECURE": "${COOKIE_SECURE:-false}"
+      },
+      "user": "${APP_UID:-10001}:${APP_GID:-10001}"
+    }
+  },
+  "volumes": {
+    "auth-db-data": {},
+    "upload-db-data": {},
+    "download-db-data": {},
+    "reports-db-data": {},
+    "rabbitmq-data": {},
+    "rustfs-data": {}
+  },
+  "networks": {
+    "edge": {
+      "internal": false
+    },
+    "broker": {
+      "internal": true
+    },
+    "objects": {
+      "internal": true
+    },
+    "auth-db-net": {
+      "internal": true
+    },
+    "upload-db-net": {
+      "internal": true
+    },
+    "download-db-net": {
+      "internal": true
+    },
+    "reports-db-net": {
+      "internal": true
+    }
+  },
+  "secrets": {
+    "jwt_private": {
+      "file": "./secrets/jwt-private.pem"
+    },
+    "jwt_public": {
+      "file": "./secrets/jwt-public.pem"
+    }
+  }
+}
